@@ -1,5 +1,5 @@
 ============
-CAMP Binning
+CAMP QC
 ============
 
 
@@ -9,7 +9,7 @@ CAMP Binning
 
 .. image:: https://img.shields.io/badge/version-0.1.0-brightgreen
 
-Minimum viable module for the binning stage of metagenomics analysis.
+Minimum viable module for the quality control stage of metagenomics analysis.
 
 
 * Free software: MIT license
