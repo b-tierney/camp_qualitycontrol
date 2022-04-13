@@ -8,100 +8,97 @@ from utils import *
 
 
 # Load program parameters and resources
-configfile: '/home/lam4003/bin/camp_binning/configs/parameters.yaml'
-configfile: '/home/lam4003/bin/camp_binning/configs/resources.yaml'
+configfile: '/athena/masonlab/scratch/users/btt4001/camp_dev/camp_qualitycontrol/configs/parameters.yaml'
+#configfile: '/athena/masonlab/scratch/users/btt4001/camp_dev/camp_qualitycontrol/configs/resources.yaml'
 
 
 # Load and/or make the working directory structure
-dirs = Workflow_Dirs(config['work_dir'], 'qc')
+dirs = Workflow_Dirs(config['work_dir'], 'quality_control_output')
 
 
 # Load sample names and input files 
 SAMPLES = ingest_samples(config['samples'], dirs.TMP)
 
-
 # --- Workflow output --- #
 
 rule all:
     input:
-        join(dirs.OUT, 'quality_controlled_reads', 'samples.csv') # sample name, bin directories
-
+        join(dirs.OUT, 'samples.csv')
 
 # --- Workflow modules --- #
-
 rule remove_adapters:
     input:
-        samplename = '{sample}'
-        fwd = join(dirs.TMP, '{sample}_1.fastq'),
-        rev = join(dirs.TMP, '{sample}_2.fastq'),
+        fwd = join(dirs.TMP,'{sample}_1.fastq'),
+        rev = join(dirs.TMP,'{sample}_2.fastq')
     output:
-        out1 = join(dirs.TMP,'{sample}', '_adapter_removed_1.fastq'),
-        out2 = join(dirs.TMP,'{sample}', '_adapter_removed_2.fastq'),
+        join(dirs.TMP,'{sample}.adapter_removed.1.fastq.gz'),
+        join(dirs.TMP,'{sample}.adapter_removed.2.fastq.gz')
     log:
         join(dirs.LOG, 'adapter_removal', '{sample}.out'),
-    threads: config['adapter_removal_threads'],
-    minquality: config['adapter_removal_minquality'],
-    adapter1: config['adapter_removal_adapter1'],
-    adapter2: config['adapter_removal_adapter2'],
+    threads: 8,
     params:
-        out_dir = join(dirs.TMP),
+        basename=join(dirs.TMP,'{sample}'),
+        minquality=config['adapterremoval_minquality'],
+        adapter1=config['adapterremoval_adapter1'],
+        adapter2=config['adapterremoval_adapter2']
     shell:
         """
-        AdapterRemoval --file1 {input.fwd} --file2 {input.rev} --trimns --trimqualities --gzip --adapter1 {adapter1} --adapter2 {adapter2} --output1 {output.out1} --output2 {output.out2} --minquality 2 --threads {threads} --basename {sample}
+        AdapterRemoval --file1 {input.fwd} --file2 {input.rev} --trimns --trimqualities --gzip --adapter1 {params.adapter1} --adapter2 {params.adapter2} --output1 {params.basename}.adapter_removed.1.fastq.gz --output2 {params.basename}.adapter_removed.2.fastq.gz --minquality {params.minquality} --threads {threads} --basename {params.basename}
         """
 
-
-
-rule calculate_depth:
+rule filter_host_reads:
     input:
-        join(dirs.OUT, '0_contig_coverage', '{sample}', 'coverage.bam'),
+        fwd = join(dirs.TMP,'{sample}.adapter_removed.1.fastq.gz'),
+        rev = join(dirs.TMP,'{sample}.adapter_removed.2.fastq.gz')
     output:
-        join(dirs.OUT, '0_contig_coverage', '{sample}', 'coverage.txt'),
+        join(dirs.TMP,'{sample}.host_filtered.adapter_removed.1.fastq.gz'),
+        join(dirs.TMP,'{sample}.host_filtered.adapter_removed.2.fastq.gz')
     log:
-        join(dirs.LOG, 'calculate_depth', '{sample}.out'),
-    shell:
-        """
-        jgi_summarize_bam_contig_depths {input} --outputDepth {output}
-        """
-
-
-rule metabat2_binning:
-    input:
-        cov = join(dirs.OUT, '0_contig_coverage', '{sample}', 'coverage.txt'),
-        ctg = join(dirs.TMP, '{sample}.fasta'),
-    output:
-        join(dirs.OUT, '1_metabat2', '{sample}', 'done.txt'),
-    log:
-        join(dirs.LOG, 'metabat2_binning', '{sample}.out'), 
-    threads: config['metabat2_binning_threads'],
-    resources:
-        mem = lambda wildcards, attempt: \
-              int(config['metabat2_binning_mem_mb']) + 40000 * attempt,
+        join(dirs.LOG, 'host_removal', '{sample}.out'),
+    threads: 8,
     params:
-        min_len = config['min_contig_len'],
-        out_dir = join(dirs.OUT, '1_metabat2', '{sample}'),
+        basename=join(dirs.TMP,'{sample}'),
+        reference_database=config['host_removal_reference_database']
     shell:
         """
-        metabat2 -m {params.min_len} -t {threads} --unbinned \
-            -i {input.ctg} -a {input.cov} -o {params.out_dir}
-        echo {params.out_dir} > {output}
+        bowtie2 -x {params.reference_database} -1 {input.fwd} -2 {input.rev} --un-conc-gz {params.basename}.host_filtered.adapter_removed.fastq.gz --very-sensitive --threads {threads} | samtools view -F 4 -b > {params.basename}_mapped_and_unmapped.bam
+        rm {params.basename}_mapped_and_unmapped.bam
+        mv {params.basename}.host_filtered.adapter_removed.fastq.1.gz {params.basename}.host_filtered.adapter_removed.1.fastq.gz
+        mv {params.basename}.host_filtered.adapter_removed.fastq.2.gz {params.basename}.host_filtered.adapter_removed.2.fastq.gz
         """
 
-
-rule make_config:
+rule correct_sequencing_error:
     input:
-        expand(join(dirs.OUT, '1_metabat2', '{sample}', 'done.txt'), \
-               sample = SAMPLES),
+        fwd = join(dirs.TMP,'{sample}.host_filtered.adapter_removed.1.fastq.gz'),
+        rev = join(dirs.TMP,'{sample}.host_filtered.adapter_removed.2.fastq.gz')
     output:
-        join(dirs.OUT, 'final_reports', 'samples.csv')
+        join(dirs.OUT,'{sample}',"corrected","corrected.yaml")
+    log:
+        join(dirs.LOG, 'correct_sequencing_error', '{sample}.out')
+    threads: 8
+    params:
+        basename=join(dirs.TMP,'{sample}'),
+        output_directory = join(dirs.OUT,'{sample}')
+    shell:
+        """
+        spades.py --only-error-correction --meta -1 {input.fwd} -2 {input.rev} -o {params.basename}_bayeshammer -t {threads}
+        mv {params.basename}_bayeshammer/corrected/ {params.output_directory}
+        """
+
+rule make_new_config_file:
+    input:
+        expand(join(dirs.OUT,'{sample}','corrected','corrected.yaml'),sample=SAMPLES)
+    output:
+        join(dirs.OUT, 'samples.csv')
     run:
-        dct = {}
+        out = []
+        print(input)
         for i in input:
-            d = open(str(i), 'r').readline().strip()
-            dct[basename(d)] = d
-        df = pd.DataFrame.from_dict(dct, orient ='index')
-        df.columns = ['sample_name', 'metabat2_dir']
+            print(i)
+            samp=i.split('/')[-3]
+            read1='/'.join(i.split('/')[:-1]) + '/' + samp + ".host_filtered.adapter_removed.1.fastq.00.0_0.cor.fastq.gz"
+            read2='/'.join(i.split('/')[:-1]) + '/' + samp + ".host_filtered.adapter_removed.2.fastq.00.0_0.cor.fastq.gz" 
+            out.append([samp,read1,read2])
+        df = pd.DataFrame(out)
+        df.columns = ['sample_ID','read1','read2']
         df.to_csv(str(output), index = False)
-
-
-
